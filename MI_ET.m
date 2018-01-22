@@ -15,10 +15,12 @@ classdef MI_ET
         nTargets;
         currTrial;
         actualTarget;
+        actualTargetType;
         inTarget;
         selCounter=0;
-        selThreshold=.6;
+        selThreshold=.5;
         selDecay=.1;
+        learningRate=1e-2;
     end
     properties (Dependent)
         currTime;
@@ -28,6 +30,7 @@ classdef MI_ET
         isExpClosed=0;
         isTraining=0;
         tform; % Calibration transformation from pixel coordinates of gaze to image coordinates
+        gazePosBuffer; % Buffer of recent gaze points, per target
     end
     methods
         %% Constructor
@@ -40,16 +43,16 @@ classdef MI_ET
             % matching with the current settings of relevant Simulink
             % model.
             
-            % Set length of initial countdown, in seconds (first ~2 minutes
-            % of recording are affected by hw filter oscillations)
+            % Set length of initial countdown, in seconds
             obj.CDlength=15;
             
             % Set desired length of recording. 
-            obj.recLength=180;
+            obj.recLength=600;
             
             % Set colors for different objects
             obj.figureParams.bg=[.05,.05,.05];
-            obj.figureParams.targetColor=[0,.4,0];
+            obj.figureParams.targetColor{1}=[0,.4,0];
+            obj.figureParams.targetColor{2}=[0,0,.4];
             obj.figureParams.cursorColor=[.4,0,.1];
             
             % Set shape and pos for cursor
@@ -58,18 +61,16 @@ classdef MI_ET
             obj.cursorPos=[0,0];
             
             % Set possible target centers and shape
-            % Two targets, horz
-
+            obj.figureParams.targetRadius=.2;
             targetX=(1:3)'*ones(1,3);
             targetY=ones(3,1)*(1:3);
-            targetX=(targetX-2)*.9;
-            targetY=(targetY-2)*.9;
+            targetX=(targetX-2)*(1-obj.figureParams.targetRadius);
+            targetY=(targetY-2)*(1-obj.figureParams.targetRadius);
             obj.nTargets=numel(targetX);
             obj.targetPos=cell(obj.nTargets,1);
             for currT=1:obj.nTargets
                 obj.targetPos{currT}=[targetX(currT),targetY(currT)];
             end
-            obj.figureParams.targetRadius=.1;
             obj.figureParams.targetShape.X=cos(linspace(0,2*pi,40))*obj.figureParams.targetRadius;
             obj.figureParams.targetShape.Y=sin(linspace(0,2*pi,40))*obj.figureParams.targetRadius;
             
@@ -105,6 +106,9 @@ classdef MI_ET
             obj.outputLog.actualTarget=[];
             obj.outputLog.isInTarget=[];
             obj.outputLog.selCounter=[];
+            obj.outputLog.currEst=[];
+            obj.outputLog.actualTargetType=[];
+            obj.outputLog.coeffsMat=[];
             
             % Ask user whether to start experiment right away
             clc;
@@ -122,18 +126,32 @@ classdef MI_ET
             % Start eye-tracking
             MI_ET.startEyeTracking;
             
+            % Ask user whether to calibrate eye-tracking. Cursor should not
+            % be visible during calibration
+            persistent calibrationTransform
+            if ~isempty(calibrationTransform)
+                userChoice=input('Perform gaze tracking calibration? [y/N]\n','s');
+            else
+                userChoice='y';
+            end
+                        
             % Opens black figure as background
             obj=createExpFigure(obj);
             
-            % Calibrate eye-tracking. Cursor should not be visible during
-            % calibration
-            obj=obj.calibrateEyeTracking;
+            % Perform calibration, if needed
+            if strcmpi(userChoice,'y');
+                obj=obj.performETcalibration;
+                calibrationTransform=obj.tform;
+            end
             
             % Sets name of Simulink model to be used for acquisition
             obj.modelName='SimpleAcquisition_16ch_2014a_RT';
             
-            % Randomly select a target
-            obj.actualTarget=ceil(rand*obj.nTargets);
+            % Randomly select a target and target type
+            obj.actualTarget=1;
+            obj.targetPos=cell(1);
+            obj.targetPos{obj.actualTarget}=rand(1,2)*2*(1-obj.figureParams.targetRadius)-1+obj.figureParams.targetRadius;
+            obj.actualTargetType=(randn>0)+1;
             
             % Prepares Simulink model (i.e. starts recording, basically)
             obj.prepareSimulinkModel;
@@ -217,6 +235,15 @@ classdef MI_ET
             if ~isempty(coords)
                 obj.cursorPos=obj.tform.transformPointsForward(coords');
             end
+            
+            % Filter gaze coordinates
+            persistent previousGazePos
+            if isempty(previousGazePos)||sum(isnan(previousGazePos))
+                previousGazePos=obj.cursorPos;
+            end
+            gazeSpeed=sqrt(sum((previousGazePos-obj.cursorPos).^2));
+            obj.cursorPos=previousGazePos*(1-sqrt(gazeSpeed))+obj.cursorPos*sqrt(gazeSpeed);
+            previousGazePos=obj.cursorPos;
             set(obj.figureParams.cursor,'XData',obj.figureParams.cursorShape.X+obj.cursorPos(1),'YData',obj.figureParams.cursorShape.Y+obj.cursorPos(2));
             
             % Check if cursor is within target
@@ -252,27 +279,46 @@ classdef MI_ET
             end
             
             % If cursor is within target, fills up selection counter
+            if isfield(obj.linearMap,'mat')
+                feats=cat(2,1,BP);
+                currEst=1./(1+exp(-(feats*obj.linearMap.mat)));
+            else
+                currEst=0;
+            end
             if obj.inTarget
                 % Use EEG data when available, otherwise use gaze alone
                 if isfield(obj.linearMap,'mat')
-                    feats=cat(2,1,BP);
-                    currEst=1./(1+exp(-(feats*obj.linearMap.mat)));
-                    obj.selCounter=max(0,obj.selCounter+currEst-obj.selThreshold);
+                    switch obj.actualTargetType
+                        case 1
+                            obj.selCounter=max(0,obj.selCounter+currEst-obj.selThreshold);
+                        case 2
+                            obj.selCounter=max(0,obj.selCounter+(1-obj.selThreshold)-currEst);
+                    end
                 else
                     obj.selCounter=obj.selCounter+.01;
                 end
                 if obj.selCounter>=1
-                    obj.actualTarget=ceil(rand*obj.nTargets);
+                    obj.actualTarget=obj.actualTarget+1;
+                    obj.targetPos{obj.actualTarget}=rand(1,2)*2*(1-obj.figureParams.targetRadius)-1+obj.figureParams.targetRadius;
+                    obj.actualTargetType=(randn>0)+1;
                     obj.selCounter=0;
+                    
+                    % Slowly decrease learning rate
+                    obj.learningRate=.95*obj.learningRate;
                 end
             else
                 obj.selCounter=obj.selCounter*(1-obj.selDecay);
             end
             
+%             % Always assume subject is staring at center of current target
+%             obj.gazePosBuffer{obj.actualTarget}=cat(2,obj.gazePosBuffer{obj.actualTarget},coords);
+%             obj.gazePosBuffer{obj.actualTarget}(:,1)=[];
+%             obj=obj.calibrateEyeTracker;
+            
             % Update target pos and color
             xTarget=obj.figureParams.targetShape.X+obj.targetPos{obj.actualTarget}(1);
             yTarget=obj.figureParams.targetShape.Y+obj.targetPos{obj.actualTarget}(2);
-            targetColor=obj.figureParams.targetColor+(1-obj.figureParams.targetColor)*obj.selCounter;
+            targetColor=obj.figureParams.targetColor{obj.actualTargetType}*(1-obj.selCounter);
             set(obj.figureParams.target,'XData',xTarget,'YData',yTarget,'FaceColor',targetColor);
             drawnow;
             
@@ -284,6 +330,13 @@ classdef MI_ET
             obj.outputLog.time=cat(1,obj.outputLog.time,obj.currTime);
             obj.outputLog.isInTarget=cat(1,obj.outputLog.isInTarget,obj.inTarget);
             obj.outputLog.selCounter=cat(1,obj.outputLog.selCounter,obj.selCounter);
+            obj.outputLog.currEst=cat(1,obj.outputLog.currEst,currEst);
+            obj.outputLog.actualTargetType=cat(1,obj.outputLog.actualTargetType,obj.actualTargetType);
+            if isfield(obj.linearMap,'mat')
+                obj.outputLog.coeffsMat=cat(1,obj.outputLog.coeffsMat,obj.linearMap.mat');
+            else
+                obj.outputLog.coeffsMat=cat(1,obj.outputLog.coeffsMat,zeros(1,17));
+            end
             
             % Set next evaluation time for this function
             obj.timeTriggeredEvents{1}.triggersLog=[obj.timeTriggeredEvents{1}.triggersLog,obj.currTime];
@@ -322,7 +375,12 @@ classdef MI_ET
             currEst=1./(1+exp(-(obj.linearMap.feats{obj.actualTarget}*obj.linearMap.mat)));
             
             % Update weights of GLM model
-            obj.linearMap.mat=MI_speed_control.updateWeights(obj.linearMap.mat,BP,currEst,obj.inTarget,1e-3);
+            switch obj.actualTargetType
+                case 1
+                    obj.linearMap.mat=MI_ET.updateWeights(obj.linearMap.mat,BP,currEst,obj.inTarget,obj.learningRate);
+                case 2
+                    obj.linearMap.mat=MI_ET.updateWeights(obj.linearMap.mat,BP,currEst,1-obj.inTarget,obj.learningRate);
+            end
         end
         
         function obj=toggleTraining(obj)
@@ -344,21 +402,21 @@ classdef MI_ET
             obj.timeTriggeredEvents{2}.triggersLog=[obj.timeTriggeredEvents{2}.triggersLog,obj.currTime];
             obj.timeTriggeredEvents{2}.nextTrigger=obj.currTime+.5;
         end
-        
-        function obj=calibrateEyeTracking(obj)
+                
+        function obj=performETcalibration(obj)
             % Generate one target in each position for about 200 steps
             % (each step is 10 ms).
             global udpr
-            obj.figureParams.target=patch(obj.figureParams.targetShape.X,obj.figureParams.targetShape.Y,obj.figureParams.targetColor);
-            gazePos=cell(obj.nTargets,1);
+            obj.figureParams.target=patch(obj.figureParams.targetShape.X,obj.figureParams.targetShape.Y,obj.figureParams.targetColor{1});
+            obj.gazePosBuffer=cell(obj.nTargets,1);
             pause(2);
             for currTarget=1:obj.nTargets
                 set(obj.figureParams.target,'XData',obj.targetPos{currTarget}(1)+obj.figureParams.targetShape.X,'YData',obj.targetPos{currTarget}(2)+obj.figureParams.targetShape.Y);
                 drawnow;
-                gazePos{currTarget}=[];
+                obj.gazePosBuffer{currTarget}=[];
                 for currRep=1:200
                     coords=str2num(char(udpr.step)'); %#ok<ST2NM>
-                    gazePos{currTarget}=cat(2,gazePos{currTarget},coords);
+                    obj.gazePosBuffer{currTarget}=cat(2,obj.gazePosBuffer{currTarget},coords);
                     pause(0.01);
                 end
             end
@@ -366,13 +424,15 @@ classdef MI_ET
             % Move target off-screen
             set(obj.figureParams.target,'XData',100+obj.figureParams.targetShape.X,'YData',obj.targetPos{currTarget}(2)+obj.figureParams.targetShape.Y);
             
-            % Use medians of coordinates during each target fixation to
+            % Perform actual calibration
+            obj=obj.calibrateEyeTracker;
+        end
+       
+        function obj=calibrateEyeTracker(obj)
+            % Use coordinates of gaze during each target fixation to
             % calibrate transformation
-            movingPoints=zeros(obj.nTargets,2);
             fixedPoints=cell2mat(obj.targetPos);
-            for currPos=1:obj.nTargets
-                movingPoints(currPos,:)=median(gazePos{currPos},2)';
-            end
+            movingPoints=[cellfun(@(x)median(x(1,:)),obj.gazePosBuffer),cellfun(@(x)median(x(2,:)),obj.gazePosBuffer)];
             obj.tform=fitgeotrans(movingPoints,fixedPoints,'Projective');
         end
         
@@ -505,9 +565,7 @@ classdef MI_ET
             % E current classifier prediction
             % t true label
             feats=[1,feats];
-            wx=feats*wIn;
-            sigma=1./(1+exp(-wx));
-            wOut=wIn+((lr*E.*(t-sigma))'*feats)';
+            wOut=wIn+((lr*(t-E))'*feats)';
         end
     end
 end
@@ -535,7 +593,7 @@ function KeyPressed(~,eventdata,~)
 % This is called each time a keyboard key is pressed while the mouse cursor
 % is within the window figure area
 if strcmp(eventdata.Key,'escape')
-    RT_MI_session.closeExp;
+    MI_ET.closeExp;
 end
 if strcmp(eventdata.Key,'p')
     keyboard;
@@ -549,5 +607,5 @@ end
 function OnClosing(~,~)
 % Overrides normal closing procedure so that regardless of how figure is
 % closed logged data is not lost
-RT_MI_session.closeExp;
+MI_ET.closeExp;
 end
