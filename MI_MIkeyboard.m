@@ -17,6 +17,7 @@ classdef MI_MIkeyboard
         selDefaultDuration=2;
         selSound;
         keyPressTimeBuffer=[];
+        session=[];
     end
     properties (Dependent)
         currTime;
@@ -71,6 +72,8 @@ classdef MI_MIkeyboard
             obj.outputLog.selEnd=[];
             obj.outputLog.selID=[];
             obj.outputLog.selDurationList=[];
+            % Seletion labels will be updated at appropriate times
+            obj.outputLog.selLbls=[];
             
             % Ask user whether to start experiment right away
             clc;
@@ -188,7 +191,7 @@ classdef MI_MIkeyboard
             inputTime=obj.currTime;
             
             % Perform the following if gaze is moving into a key
-            if ~strcmp(obj.selStartID,obj.currKeyID)||(obj.outputLog.isInTarget(end)==0&&obj.inTarget==1)
+            if ~strcmp(char(obj.selStartID),char(obj.currKeyID))||(obj.outputLog.isInTarget(end)==0&&obj.inTarget==1)
                 % Recover most recent raw data buffer from workspace and
                 % send it to Matlab2018 over UDP for analysis
                 dataPacket=evalin('base','bufferData');
@@ -209,6 +212,14 @@ classdef MI_MIkeyboard
                     end
                 end
                 fprintf('%0.1f\n',obj.selDuration)
+                
+                obj.outputLog.selStart=cat(1,obj.outputLog.selStart,obj.selStartTime);
+                if ~isempty(obj.outputLog.selStart) %i.e. not the first time a key is gaze upon
+                    obj.outputLog.selEnd=cat(1,obj.outputLog.selEnd,inputTime);
+                    obj.outputLog.selID{end+1}=obj.currKeyID;
+                    obj.outputLog.selDurationList=cat(1,obj.outputLog.selDurationList,obj.selDuration);
+                    obj.outputLog.selLbls=cat(1,obj.outputLog.selLbls,0);
+                end
                 
                 obj.selStartID=obj.currKeyID;
                 obj.selStartTime=inputTime;
@@ -234,7 +245,8 @@ classdef MI_MIkeyboard
                 obj.outputLog.selEnd=cat(1,obj.outputLog.selEnd,inputTime);
                 obj.outputLog.selID{end+1}=obj.currKeyID;
                 obj.outputLog.selDurationList=cat(1,obj.outputLog.selDurationList,obj.selDuration);
-                obj.selStartTime=obj.currTime;
+                obj.outputLog.selLbls=cat(1,obj.outputLog.selLbls,1);
+                obj.selStartTime=inputTime;
                 
                 % Update buffer of key presses
                 obj.keyPressTimeBuffer=[obj.keyPressTimeBuffer,obj.currTime];
@@ -244,7 +256,7 @@ classdef MI_MIkeyboard
             obj.keyboardUDPchannels.udps.step(outString);
             
             % Add relevant info to log
-            obj.outputLog.time=cat(1,obj.outputLog.time,obj.currTime);
+            obj.outputLog.time=cat(1,obj.outputLog.time,inputTime);
             obj.outputLog.isTraining=cat(1,obj.outputLog.isTraining,obj.isTraining);
             obj.outputLog.isInTarget=cat(1,obj.outputLog.isInTarget,obj.inTarget);
             obj.outputLog.selCounter=cat(1,obj.outputLog.selCounter,obj.selCounter);
@@ -345,11 +357,7 @@ classdef MI_MIkeyboard
                 obj.outputLog.(updatingFields{currUpField})=cat(1,obj.outputLog.(updatingFields{currUpField}),otherSession.outputLog.(updatingFields{currUpField})+obj.rawData.time(end));
             end
             for currJoinField=1:length(joiningFields)
-                try
                 obj.outputLog.(joiningFields{currJoinField})=cat(find(size(obj.outputLog.(joiningFields{currJoinField}))==max(size(obj.outputLog.(joiningFields{currJoinField})))),obj.outputLog.(joiningFields{currJoinField}),otherSession.outputLog.(joiningFields{currJoinField}));
-                catch
-                    keyboard;
-                end
             end
             for currTTE=1:length(obj.timeTriggeredEvents)
                 obj.timeTriggeredEvents{currTTE}.triggersLog=cat(2,obj.timeTriggeredEvents{currTTE}.triggersLog,otherSession.timeTriggeredEvents{currTTE}.triggersLog+obj.rawData.time(end));
@@ -416,9 +424,11 @@ classdef MI_MIkeyboard
         function objLong=joinSessions(fileNames)
             load(fileNames{1});
             objLong=obj;
+%             objLong.session=ones(length(obj.outputLog.selLbls),1);
             for currFile=2:length(fileNames)
                 load(fileNames{currFile});
                 objLong=attachPhase(objLong,obj);
+%                 objLong.session=cat(1,objLong.session,ones(length(obj.outputLog.selLbls),1)*currFile);
             end
         end
     end

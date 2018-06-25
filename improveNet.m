@@ -3,9 +3,12 @@ clear
 clc
 
 % load('C:\Data\2018_05_keyboard\Tests\20180604T161434_longTraining.mat')
+% load('fileList.mat');
+% obj=MI_MIkeyboard.joinSessions(f);
+% load('C:\Data\2018_06_MIkeyboard\S_Chang\20180614T102919.mat')
+load('lastNet.mat','net');
 f=getFileList;
 obj=MI_MIkeyboard.joinSessions(f);
-% load('C:\Data\2018_06_MIkeyboard\S_Chang\20180614T102919.mat')
 
 % Recover correct selCounter from UDP transmissions
 selCounter=cellfun(@(x)str2double(char(x)),obj.outputLog.keyUDPlogOut);
@@ -36,30 +39,16 @@ trialData(toBeRemoved)=[];
 trialLbls(toBeRemoved)=[];
 trialLbls=double(trialLbls);
 
-% Create network
-nNeurons= 40;
+% Setup parameters
 maxEpochs = 100;
 validationChecks=15;
 miniBatchSize = round(length(trialLbls)/5);
-inputSize = size(trialData{1},1);
-numClasses = 2;
-trainBAcc=zeros(length(nNeurons),1); %#ok<*PREALL>
-testBAcc=zeros(length(nNeurons),1);
-
-% Define network structure and training options
-layers=[ ...
-    sequenceInputLayer(inputSize)
-    lstmLayer(nNeurons,'OutputMode','last')
-    fullyConnectedLayer(numClasses)
-    softmaxLayer
-    classificationLayer];
 options = trainingOptions('adam', ...
     'ExecutionEnvironment','auto', ...
     'MaxEpochs',1, ...
     'MiniBatchSize',miniBatchSize, ...
     'GradientThreshold',1, ...
-    'Verbose',0);%,...
-%'Plots','training-progress');
+    'Verbose',0);
 
 computeBAcc=@(x,y)mean((x-y).^2);
 testAcc=@(x,y)(sum((x==1).*(y==1))./sum(x==1)+sum((x==0).*(y==0))./sum(x==0))*.5;
@@ -80,11 +69,7 @@ currEpoch=1;
 valBAcc=zeros(maxEpochs,1);
 fltrdValBAcc=zeros(maxEpochs,1);
 while true
-    if exist('net','var')
-        net=trainNetwork(trainData',categorical(trainLbls),net.Layers,options);
-    else
-        net=trainNetwork(trainData',categorical(trainLbls),layers,options);
-    end
+    net=trainNetwork(trainData',categorical(trainLbls),net.Layers,options);
     
     % Generate validation lbls
     valLblsEst=classify(net,valData);
